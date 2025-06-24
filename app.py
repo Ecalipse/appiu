@@ -7,8 +7,10 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 import xgboost as xgb
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression 
 import logging
+
+# Removed decomposition imports: from statsmodels.tsa.seasonal import seasonal_decompose, DecomposeResult
 
 # Configure logging to suppress verbose output from libraries if needed
 # logging.basicConfig(level=logging.INFO) # Set to DEBUG for more verbose, INFO for less.
@@ -273,51 +275,28 @@ def fetch_all_future_symbols(exchange_id):
         exchange = exchange_class({
             'enableRateLimit': True,
         })
+        markets = exchange.load_markets()
         
         future_symbols = []
-        markets = {}
-
-        # Attempt to fetch linear and inverse markets directly to avoid 'spot' category calls
-        try:
-            # For Bybit, specific categories can be fetched directly.
-            # This is a more robust way to exclude spot markets if they are geo-restricted.
-            linear_markets = exchange.fetch_markets({'params': {'category': 'linear'}})
-            for market in linear_markets:
-                if market.get('settleId') == 'USDT' and market['active']:
-                    markets[market['symbol']] = market
-        except Exception as e:
-            logging.warning(f"Could not fetch linear markets for {exchange_id}: {e}")
-
-        try:
-            inverse_markets = exchange.fetch_markets({'params': {'category': 'inverse'}})
-            for market in inverse_markets:
-                if market.get('settleId') == 'USD' and market['active']:
-                    markets[market['symbol']] = market
-        except Exception as e:
-            logging.warning(f"Could not fetch inverse markets for {exchange_id}: {e}")
-
-        # Fallback if specific category fetches don't work or for other exchanges
-        # This general load_markets might still trigger spot calls for some exchanges.
-        if not markets and hasattr(exchange, 'load_markets'):
-            full_markets = exchange.load_markets()
-            for market_id, market in full_markets.items():
-                is_future = (
-                    market.get('linear', False) or market.get('inverse', False) or market.get('contract', False) or market.get('swap', False)
-                )
-                is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
-                if is_future and is_usdt_usd_settled and market['active']:
-                    markets[market['symbol']] = market
+        for market_id, market in markets.items():
+            # Check for common indicators of future/perpetual contracts
+            # This logic might need adjustment based on specific exchange nuances
+            is_future = market.get('spot', False) is False and (
+                market.get('linear', False) or market.get('inverse', False) or market.get('contract', False)
+            )
+            # Filter for USDT or USD settled futures as common use case
+            is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
             
-        for symbol, market in markets.items():
-            future_symbols.append(symbol)
+            if is_future and is_usdt_usd_settled and market['active']:
+                future_symbols.append(market['symbol'])
         
         future_symbols.sort() # Sort alphabetically for easy selection
         return future_symbols
     except ccxt.NetworkError as e:
-        st.error(f"Network error fetching symbols from {exchange_id}: {e}. This might be due to geographical restrictions on certain market types (e.g., spot) from the exchange's side. Try selecting a different exchange or checking your network/location.")
+        st.error(f"Network error fetching symbols from {exchange_id}: {e}")
         return []
     except ccxt.ExchangeError as e:
-        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}. Please check the exchange status or your API permissions.")
+        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}")
         return []
     except Exception as e:
         st.error(f"An unexpected error occurred while fetching symbols: {e}")
@@ -342,6 +321,8 @@ all_available_symbols = fetch_all_future_symbols(selected_exchange_id)
 default_symbol_index = 0
 if 'BTC/USDT:USDT' in all_available_symbols: # Common Bybit/Binance perpetual
     default_symbol_index = all_available_symbols.index('BTC/USDT:USDT')
+elif 'BTC/USD:USD' in all_available_symbols: # Common Binance/Bybit inverse perpetual
+    default_symbol_index = all_available_symbols.index('BTC/USD:USD')
 elif all_available_symbols:
     default_symbol_index = 0 # Fallback to the first symbol if common ones not found
 else:
@@ -471,141 +452,283 @@ if st.sidebar.button("Fetch Data and Run Analysis"):
 
         feature_columns = [col for col in df_features_labels.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'is_pivot', 'pivot_type', 'future_pivot', 'pivot_type_encoded', 'BB_Middle', 'BB_Upper', 'BB_Lower']]
         feature_columns = [col for col in feature_columns if not df_features_labels[col].isnull().all()] 
-                                
-                                # --- Machine Learning Models ---
+
+         # --- Machine Learning Models ---
+
         st.subheader("Machine Learning Model Training")
+
+
+
         st.info("Training XGBoost for 'future_pivot' prediction (Is there a pivot in the next X candles?).")
+
         xgboost_model, _, _, _, _ = train_xgboost_model(df_features_labels, feature_columns, 'future_pivot')
+
+        
+
         st.info("SVM model removed as per request.")
 
+
+
         # --- Predictions ---
+
         st.subheader("Forecasting Future Pivots")
+
         future_pivots_plot = []
+
         num_future_pivots_xgboost = 0
 
+
+
         if xgboost_model:
+
             xgboost_predicted_pivots, num_future_pivots_xgboost = predict_next_pivots(
+
                 xgboost_model, df_features_labels, feature_columns, future_horizon, prediction_threshold
+
             )
+
             future_pivots_plot.extend(xgboost_predicted_pivots)
+
             st.info(f"XGBoost predicted {num_future_pivots_xgboost} future pivot events.")
+
         else:
+
             st.warning("XGBoost model not trained. Cannot make future pivot predictions.")
+
         
+
         total_predicted_pivots = len(future_pivots_plot)
+
         if total_predicted_pivots == 0:
+
             st.info("No potential future pivots predicted based on current data and threshold.")
+
         else:
+
             st.success(f"Found {total_predicted_pivots} potential future pivots.")
 
+
+
         # --- Visualization ---
+
         st.write("---")
+
         st.subheader("Crypto Price Chart with Turning Points and ML Predicted Pivots")
 
+
+
         st.write(f"Confirmed Turning Point Indices count: {len(confirmed_turning_point_indices)}")
+
         st.write(f"Future Pivots to Plot count: {len(future_pivots_plot)}")
+
+
 
         fig, ax1 = plt.subplots(figsize=(15, 8))
 
+
+
         ax1.plot(df.index, df['Close'], label='Close Price', color='blue', linewidth=1.5)
 
+
+
         if turning_points and len(turning_points) > 0:
+
             min_points_x = [p[0] for p in turning_points if p[2] == -1]
+
             min_points_y = [p[1] for p in turning_points if p[2] == -1]
+
             max_points_x = [p[0] for p in turning_points if p[2] == 1]
+
             max_points_y = [p[1] for p in turning_points if p[2] == 1]
+
             
+
             if min_points_x:
+
                 ax1.plot(min_points_x, min_points_y, 'o', color='red', markersize=6, label='Local Minimums')
 
+
+
             if max_points_x:
+
                 ax1.plot(max_points_x, max_points_y, 'o', color='green', markersize=6, label='Local Maximums')
 
+
+
         else:
+
             st.warning("No turning points detected to plot. Chart will only show price data.")
 
+
+
         if future_pivots_plot:
-            for pivot in future_pivots_plot: # Corrected from 'future_pots_plot'
+
+            for pivot in future_pivots_plot:
+
                 time_dt = pivot['time']
+
                 price = pivot['price']
+
                 pivot_type = pivot['type']
+
                 probability = pivot['probability']
 
+
+
                 ax1.axvline(x=time_dt, color='purple', linestyle=':', linewidth=1.5, label='Predicted Pivot' if pivot == future_pivots_plot[0] else "")
+
                 ax1.annotate(f'{pivot_type}\nProb: {probability:.2f}',
-                                    xy=(time_dt, price),
-                                    xytext=(time_dt, price + (df['Close'].max() - df['Close'].min()) * 0.05),
-                                    arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5),
-                                    horizontalalignment='center', verticalalignment='bottom', color='purple', fontsize=9,
-                                    bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="b", lw=1, alpha=0.6))
+
+                             xy=(time_dt, price),
+
+                             xytext=(time_dt, price + (df['Close'].max() - df['Close'].min()) * 0.05),
+
+                             arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5),
+
+                             horizontalalignment='center', verticalalignment='bottom', color='purple', fontsize=9,
+
+                             bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="b", lw=1, alpha=0.6))
+
             st.success("Future pivot predictions plotted.")
+
         else:
+
             st.info("No future pivots to plot.")
 
+
+
         ax1.set_title(f"{symbol} Price Chart with Turning Points and ML Predicted Pivots ({timeframe})")
+
         ax1.set_xlabel("Time")
+
         ax1.set_ylabel("Price")
+
         ax1.grid(True)
+
         ax1.legend()
+
         fig.autofmt_xdate()
 
+
+
         st.pyplot(fig)
+
         
+
         # --- Chart with Line of Best Fit and Error ---
+
         st.write("---")
+
         st.subheader("Turning Points with Line of Best Fit and Residuals")
 
+
+
         if turning_points:
+
             turning_point_df = pd.DataFrame(turning_points, columns=['timestamp', 'price', 'type'])
+
             
+
             X_tp = (turning_point_df['timestamp'].astype(np.int64) // 10**9).values.reshape(-1, 1)
+
             y_tp = turning_point_df['price'].values
 
+
+
             if len(X_tp) > 1:
+
                 model_lr = LinearRegression()
+
                 model_lr.fit(X_tp, y_tp)
+
                 
+
                 y_pred_lr = model_lr.predict(X_tp)
+
+
 
                 fig_lr, ax_lr = plt.subplots(figsize=(15, 8))
 
+
+
                 x_plot_dt = pd.to_datetime(X_tp.flatten() * 10**9)
 
+
+
                 min_points_x_plot = [p_dt for p_dt, p_type in zip(x_plot_dt, turning_point_df['type']) if p_type == -1]
+
                 min_points_y_plot = [p_y for p_y, p_type in zip(turning_point_df['price'], turning_point_df['type']) if p_type == -1]
+
                 max_points_x_plot = [p_dt for p_dt, p_type in zip(x_plot_dt, turning_point_df['type']) if p_type == 1]
+
                 max_points_y_plot = [p_y for p_y, p_type in zip(turning_point_df['price'], turning_point_df['type']) if p_type == 1]
 
+
+
                 if min_points_x_plot:
+
                     ax_lr.plot(min_points_x_plot, min_points_y_plot, 'o', color='red', markersize=6, label='Local Minimums')
+
                 if max_points_x_plot:
+
                     ax_lr.plot(max_points_x_plot, max_points_y_plot, 'o', color='green', markersize=6, label='Local Maximums')
+
+
 
                 ax_lr.plot(x_plot_dt, y_pred_lr, color='blue', linestyle='--', label='Line of Best Fit')
 
+
+
                 for i in range(len(turning_point_df)):
+
                     tp_time_dt = turning_point_df['timestamp'].iloc[i]
+
                     tp_price = turning_point_df['price'].iloc[i]
+
                     predicted_price_at_tp = y_pred_lr[i]
+
                     
+
                     ax_lr.plot([tp_time_dt, tp_time_dt], [tp_price, predicted_price_at_tp], color='gray', linestyle=':', linewidth=0.8)
 
+
+
                 ax_lr.set_title("Turning Points with Line of Best Fit and Residuals") 
+
                 ax_lr.set_xlabel("Time")
+
                 ax_lr.set_ylabel("Price")
+
                 ax_lr.grid(True)
+
                 ax_lr.legend()
+
                 fig_lr.autofmt_xdate()
+
                 st.pyplot(fig_lr)
+
             else:
+
                 st.info("Not enough turning points to compute a line of best fit (need at least 2 points).")
+
         else:
+
             st.info("No turning points detected to plot the line of best fit.")
 
+
+
+
+
     except ccxt.NetworkError as e:
+
         st.error(f"Network error: {e}. Please check your internet connection or try again later.")
+
     except ccxt.ExchangeError as e:
+
         st.error(f"Exchange error: {e}. Please check the symbol, timeframe, or exchange ID.")
+
     except Exception as e:
+
         st.error(f"An unexpected error occurred: {e}")
-        st.exception(e)
+
+        st.exception(e) tp_price = turning_
