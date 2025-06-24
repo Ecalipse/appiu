@@ -273,28 +273,51 @@ def fetch_all_future_symbols(exchange_id):
         exchange = exchange_class({
             'enableRateLimit': True,
         })
-        markets = exchange.load_markets()
         
         future_symbols = []
-        for market_id, market in markets.items():
-            # Check for common indicators of future/perpetual contracts
-            # This logic might need adjustment based on specific exchange nuances
-            is_future = (
-                market.get('linear', False) or market.get('inverse', False) or market.get('contract', False)
-            )
-            # Filter for USDT or USD settled futures as common use case
-            is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
+        markets = {}
+
+        # Attempt to fetch linear and inverse markets directly to avoid 'spot' category calls
+        try:
+            # For Bybit, specific categories can be fetched directly.
+            # This is a more robust way to exclude spot markets if they are geo-restricted.
+            linear_markets = exchange.fetch_markets({'params': {'category': 'linear'}})
+            for market in linear_markets:
+                if market.get('settleId') == 'USDT' and market['active']:
+                    markets[market['symbol']] = market
+        except Exception as e:
+            logging.warning(f"Could not fetch linear markets for {exchange_id}: {e}")
+
+        try:
+            inverse_markets = exchange.fetch_markets({'params': {'category': 'inverse'}})
+            for market in inverse_markets:
+                if market.get('settleId') == 'USD' and market['active']:
+                    markets[market['symbol']] = market
+        except Exception as e:
+            logging.warning(f"Could not fetch inverse markets for {exchange_id}: {e}")
+
+        # Fallback if specific category fetches don't work or for other exchanges
+        # This general load_markets might still trigger spot calls for some exchanges.
+        if not markets and hasattr(exchange, 'load_markets'):
+            full_markets = exchange.load_markets()
+            for market_id, market in full_markets.items():
+                is_future = (
+                    market.get('linear', False) or market.get('inverse', False) or market.get('contract', False) or market.get('swap', False)
+                )
+                is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
+                if is_future and is_usdt_usd_settled and market['active']:
+                    markets[market['symbol']] = market
             
-            if is_future and is_usdt_usd_settled and market['active']:
-                future_symbols.append(market['symbol'])
+        for symbol, market in markets.items():
+            future_symbols.append(symbol)
         
         future_symbols.sort() # Sort alphabetically for easy selection
         return future_symbols
     except ccxt.NetworkError as e:
-        st.error(f"Network error fetching symbols from {exchange_id}: {e}")
+        st.error(f"Network error fetching symbols from {exchange_id}: {e}. This might be due to geographical restrictions on certain market types (e.g., spot) from the exchange's side. Try selecting a different exchange or checking your network/location.")
         return []
     except ccxt.ExchangeError as e:
-        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}")
+        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}. Please check the exchange status or your API permissions.")
         return []
     except Exception as e:
         st.error(f"An unexpected error occurred while fetching symbols: {e}")
@@ -502,7 +525,7 @@ if st.sidebar.button("Fetch Data and Run Analysis"):
             st.warning("No turning points detected to plot. Chart will only show price data.")
 
         if future_pivots_plot:
-            for pivot in future_pots_plot:
+            for pivot in future_pivots_plot: # Corrected from 'future_pots_plot'
                 time_dt = pivot['time']
                 price = pivot['price']
                 pivot_type = pivot['type']
