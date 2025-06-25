@@ -3,467 +3,164 @@ import ccxt
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-import xgboost as xgb
-from sklearn.linear_model import LinearRegression
-import logging
-
-# Configure logging to suppress verbose output from libraries if needed
-# logging.basicConfig(level=logging.INFO) # Set to DEBUG for more verbose, INFO for less.
-# logging.getLogger('ccxt').setLevel(logging.WARNING) # Suppress CCXT debug logs if too noisy
 
 st.set_page_config(layout="wide", page_title="Crypto Pivot Analyzer")
 
-# --- Helper Functions ---
-
 def find_turning_points(df_close_prices):
-    """
-    Finds local minimums and maximums in a series using the sign of the first differences.
-    This method is robust to noise by focusing on the change in slope direction.
-    Returns a list of tuples (timestamp, price, type), where type is 1 for max, -1 for min.
-    """
-    if len(df_close_prices) < 3: # Need at least 3 points for meaningful diff and sign changes
+    if len(df_close_prices) < 3:
         return []
-
-    # Calculate the first difference of the close prices
     first_diff = np.diff(df_close_prices.values)
-    
-    # Take the sign of the first difference. This transforms slopes into -1, 0, or 1.
-    # A change from positive to negative sign (1 to -1) indicates a peak.
-    # A change from negative to positive sign (-1 to 1) indicates a trough.
     signed_diff = np.sign(first_diff)
-    
-    # Calculate the difference of the signed differences.
-    # This will be non-zero at points where the slope changes direction significantly.
-    # For a peak, it will typically be -2 (1 - (-1)).
-    # For a trough, it will typically be 2 (-1 - 1).
     diff_of_signed_diff = np.diff(signed_diff)
-
     turning_points = []
-    
-    # Iterate through the array of differences of signed differences
-    # The index in diff_of_signed_diff corresponds to index + 1 in the original signed_diff
-    # and index + 2 in the original df_close_prices due to two diff operations.
     for i in range(len(diff_of_signed_diff)):
-        # Ensure the index aligns with the original df_close_prices
-        original_index = df_close_prices.index[i + 1] 
+        original_index = df_close_prices.index[i + 1]
         original_price = df_close_prices.iloc[i + 1]
-
-        if diff_of_signed_diff[i] < 0: 
-            turning_points.append((original_index, original_price, 1)) # 1 for local maximum
+        if diff_of_signed_diff[i] < 0:
+            turning_points.append((original_index, original_price, 1))
         elif diff_of_signed_diff[i] > 0:
-            turning_points.append((original_index, original_price, -1)) # -1 for local minimum
-    
-    # Additional refinement: Ensure that consecutive turning points alternate between min and max.
+            turning_points.append((original_index, original_price, -1))
     filtered_turning_points = []
     if turning_points:
-        filtered_turning_points.append(turning_points[0]) 
+        filtered_turning_points.append(turning_points[0])
         for i in range(1, len(turning_points)):
             if turning_points[i][2] != filtered_turning_points[-1][2]:
                 filtered_turning_points.append(turning_points[i])
             else:
                 last_point = filtered_turning_points[-1]
                 current_point = turning_points[i]
-                if current_point[2] == 1: 
+                if current_point[2] == 1:
                     if current_point[1] > last_point[1]:
                         filtered_turning_points[-1] = current_point
-                elif current_point[2] == -1: 
+                elif current_point[2] == -1:
                     if current_point[1] < last_point[1]:
                         filtered_turning_points[-1] = current_point
-
     return filtered_turning_points
 
-def add_lagged_features(df, lags):
-    df_copy = df.copy()
-    for lag in lags:
-        df_copy[f'Close_Lag_{lag}'] = df_copy['Close'].shift(lag)
-        df_copy[f'High_Lag_{lag}'] = df_copy['High'].shift(lag)
-        df_copy[f'Low_Lag_{lag}'] = df_copy['Low'].shift(lag)
-        df_copy[f'Volume_Lag_{lag}'] = df_copy['Volume'].shift(lag)
-    return df_copy
-
-def add_technical_indicators(df):
-    df_copy = df.copy()
-    # Simple Moving Average (SMA)
-    df_copy['SMA_10'] = df_copy['Close'].rolling(window=10).mean()
-    df_copy['SMA_20'] = df_copy['Close'].rolling(window=20).mean()
-
-    # Relative Strength Index (RSI)
-    delta = df_copy['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df_copy['RSI'] = 100 - (100 / (1 + rs))
-
-    # Moving Average Convergence Divergence (MACD)
-    exp1 = df_copy['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_copy['Close'].ewm(span=26, adjust=False).mean()
-    df_copy['MACD'] = exp1 - exp2
-    df_copy['Signal_Line'] = df_copy['MACD'].ewm(span=9, adjust=False).mean()
-
-    # Bollinger Bands
-    df_copy['BB_Middle'] = df_copy['Close'].rolling(window=20).mean()
-    df_copy['BB_Upper'] = df_copy['BB_Middle'] + (df_copy['Close'].rolling(window=20).std() * 2)
-    df_copy['BB_Lower'] = df_copy['BB_Middle'] - (df_copy['Close'].rolling(window=20).std() * 2)
-
-    # Price Rate of Change (ROC)
-    df_copy['ROC'] = ((df_copy['Close'] - df_copy['Close'].shift(10)) / df_copy['Close'].shift(10)) * 100
-
-    # True Range (TR) and Average True Range (ATR)
-    df_copy['High-Low'] = df_copy['High'] - df_copy['Low']
-    df_copy['High-PrevClose'] = abs(df_copy['High'] - df_copy['Close'].shift(1))
-    df_copy['Low-PrevClose'] = abs(df_copy['Low'] - df_copy['Close'].shift(1))
-    df_copy['TR'] = df_copy[['High-Low', 'High-PrevClose', 'Low-PrevClose']].max(axis=1)
-    df_copy['ATR'] = df_copy['TR'].rolling(window=14).mean()
-
-    # On-Balance Volume (OBV)
-    df_copy['OBV'] = (np.sign(df_copy['Close'].diff()) * df_copy['Volume']).fillna(0).cumsum()
-
-    # Return
-    df_copy['Return'] = df_copy['Close'].pct_change()
-
-    return df_copy.drop(columns=['High-Low', 'High-PrevClose', 'Low-PrevClose', 'TR'])
-
-def create_features_and_labels(df, turning_points, future_horizon=5):
-    df_features = df.copy()
-
-    # Add 'is_pivot' label (0 or 1)
-    df_features['is_pivot'] = 0
-    df_features['pivot_type'] = 0 # -1 for low, 1 for high, 0 for not a pivot
-    
-    # Map turning points to the DataFrame
-    turning_point_data = pd.DataFrame(turning_points, columns=['timestamp', 'price', 'type'])
-    turning_point_data['timestamp'] = pd.to_datetime(turning_point_data['timestamp'])
-    
-    # Convert df_features index to datetime if it's not already
-    df_features.index = pd.to_datetime(df_features.index)
-
-    # Use a more robust method to find the closest index without 'method' keyword
-    df_index_values = df_features.index.values
-
-    for _, row in turning_point_data.iterrows():
-        target_timestamp = row['timestamp'].to_datetime64() # Convert to numpy datetime64 for comparison
-        
-        # Find the insertion point for the target timestamp in the sorted index
-        idx_pos = np.searchsorted(df_index_values, target_timestamp)
-        
-        closest_idx = -1
-        # Check if the insertion point is within bounds
-        if idx_pos == 0:
-            closest_idx = 0
-        elif idx_pos == len(df_index_values):
-            closest_idx = len(df_index_values) - 1
-        else:
-            # Compare distances to the two nearest indices
-            left_diff = abs(df_index_values[idx_pos - 1] - target_timestamp)
-            right_diff = abs(df_index_values[idx_pos] - target_timestamp)
-            
-            if left_diff <= right_diff:
-                closest_idx = idx_pos - 1
-            else:
-                closest_idx = idx_pos
-        
-        # Apply the pivot label to the found index
-        df_features.loc[df_features.index[closest_idx], 'is_pivot'] = 1
-        df_features.loc[df_features.index[closest_idx], 'pivot_type'] = row['type']
-
-    # Add 'future_pivot' label (1 if a pivot occurs in the next 'future_horizon' bars)
-    df_features['future_pivot'] = 0
-    for i in range(len(df_features) - future_horizon):
-        if df_features['is_pivot'].iloc[i+1 : i+1+future_horizon].sum() > 0:
-            df_features.loc[df_features.index[i], 'future_pivot'] = 1
-
-    # Encode pivot_type (for multi-class classification)
-    df_features['pivot_type_encoded'] = df_features['pivot_type'].map({-1: 0, 0: 1, 1: 2}) # Low=0, None=1, High=2
-
-    return df_features
-
-def train_xgboost_model(df_features, feature_columns, target_column='future_pivot'):
-    df_model = df_features.dropna(subset=feature_columns + [target_column]).copy()
-
-    if df_model.empty or len(df_model) < 50:
-        st.warning("Insufficient data after dropping NaNs for XGBoost training. Skipping.")
-        return None, None, None, None, None
-
-    X = df_model[feature_columns]
-    y = df_model[target_column]
-
-    if y.nunique() < 2:
-        st.warning(f"Not enough diverse data points for XGBoost pivot detection training (target has only {y.nunique()} unique values). Skipping.")
-        return None, None, None, None, None
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-    model = xgb.XGBClassifier(objective='binary:logistic', eval_metric='logloss', use_label_encoder=False, random_state=42)
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred, output_dict=True)
-
-    st.success(f"XGBoost Pivot Detection Model Accuracy: {accuracy:.2f}")
-    st.dataframe(pd.DataFrame(report).transpose())
-
-    return model, X_test, y_test, accuracy, df_model.index[-1]
-
-def predict_next_pivots(model, df_latest_features, feature_columns, future_horizon, prediction_threshold=0.3):
-    """
-    Predicts future pivots based on the trained model.
-    df_latest_features is expected to be the DataFrame with all features already calculated.
-    """
-    if model is None:
-        return [], 0
-
-    # Ensure we get the last row where all relevant feature columns are non-NaN
-    # This addresses the "Features for prediction contain NaN values" error
-    X_pred_latest = df_latest_features[feature_columns].dropna().tail(1).copy()
-
-    if X_pred_latest.empty:
-        st.warning("No valid data points with complete features available for prediction. Cannot make prediction.")
-        return [], 0
-    
-    # No scaler needed as SVM is removed, so X_pred_latest_scaled is just X_pred_latest
-    probabilities = model.predict_proba(X_pred_latest)[0]
-
-    if len(probabilities) == 2:
-        pivot_prob = probabilities[1]
-        predicted_class = model.predict(X_pred_latest)[0]
-    else:
-        st.error("Unexpected number of classes in prediction probabilities.")
-        return [], 0
-
-    st.info(f"Latest candle's predicted pivot probability: {pivot_prob:.4f}")
-
-    future_pivots = []
-    num_future_pivots = 0
-    if pivot_prob >= prediction_threshold:
-        # Get the timestamp of the actual last candle in the original dataframe
-        # This is critical to correctly place the prediction in time
-        last_index_dt = df_latest_features.index[-1]
-            
-        timeframe_map = {'1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440}
-        interval_minutes = timeframe_map.get(st.session_state.timeframe_selected, 1)
-        
-        # Predict the pivot time 'future_horizon' steps into the future from the last data point
-        predicted_pivot_time = pd.to_datetime(last_index_dt) + pd.to_timedelta(future_horizon * interval_minutes, unit='m')
-        # Use the price of the last data point from which prediction was made
-        predicted_price = df_latest_features['Close'].iloc[-1] 
-        pivot_type_str = ""
-
-        if predicted_class == 1:
-            pivot_type_str = "Predicted Future Pivot"
-
-        future_pivots.append({
-            'time': predicted_pivot_time,
-            'price': predicted_price,
-            'type': pivot_type_str,
-            'probability': pivot_prob
-        })
-        num_future_pivots = len(future_pivots)
-
-    return future_pivots, num_future_pivots
-
-@st.cache_data(ttl=3600) # Cache for 1 hour to reduce API calls
+@st.cache_data(ttl=3600)
 def fetch_all_future_symbols(exchange_id):
-    """Fetches all future (perpetual) symbols for a given exchange, with no spot-related logic."""
     try:
         exchange_class = getattr(ccxt, exchange_id)
-        exchange = exchange_class({
-            'enableRateLimit': True,
-        })
-        
-        future_symbols_dict = {}
-
-        if exchange_id == 'bybit':
-            # For Bybit, specifically request 'linear' and 'inverse' categories to ensure
-            # no implicit 'spot' category calls occur.
-            try:
-                linear_markets = exchange.fetch_markets({'params': {'category': 'linear'}})
-                for market in linear_markets:
-                    if market.get('settleId') == 'USDT' and market['active'] and market.get('swap'): # ensure it's a perpetual swap
-                        future_symbols_dict[market['symbol']] = market
-            except Exception as e:
-                # Provide a specific error message for geo-blocking if it occurs here for Bybit
-                if "403 Forbidden" in str(e) and exchange_id == 'bybit':
-                    st.error(f"**Geo-blocking detected for Bybit:** The server's location appears to be blocked by Bybit's CDN for fetching market data. Even though the code attempts to fetch only futures, Bybit's API or CCXT's internal logic may still trigger a geo-blocked request. Please try selecting a different exchange (e.g., Binance).")
-                else:
-                    logging.warning(f"Could not fetch linear perpetual markets for Bybit: {e}")
-                return [] # Return empty list if this crucial step fails for Bybit
-
-            try:
-                inverse_markets = exchange.fetch_markets({'params': {'category': 'inverse'}})
-                for market in inverse_markets:
-                    if market.get('settleId') == 'USD' and market['active'] and market.get('swap'): # ensure it's a perpetual swap
-                        future_symbols_dict[market['symbol']] = market
-            except Exception as e:
-                if "403 Forbidden" in str(e) and exchange_id == 'bybit':
-                    st.error(f"**Geo-blocking detected for Bybit:** The server's location appears to be blocked by Bybit's CDN for fetching market data. Even though the code attempts to fetch only futures, Bybit's API or CCXT's internal logic may still trigger a geo-blocked request. Please try selecting a different exchange (e.g., Binance).")
-                else:
-                    logging.warning(f"Could not fetch inverse perpetual markets for Bybit: {e}")
-                return [] # Return empty list if this crucial step fails for Bybit
-            
-            if not future_symbols_dict:
-                st.warning(f"No perpetual futures markets found for {exchange_id} using category-specific fetching. This might be expected or an issue.")
-
-        else:
-            # For other exchanges, use load_markets and filter only by future/swap properties.
-            # No explicit 'spot' check is needed here, as non-future/swap markets will be excluded.
-            markets = exchange.load_markets() 
-            for market_id, market in markets.items():
-                is_future_or_swap = (
-                    market.get('linear', False) or 
-                    market.get('inverse', False) or 
-                    market.get('contract', False) or 
-                    market.get('swap', False)
-                )
-                is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
-                
-                if is_future_or_swap and is_usdt_usd_settled and market['active']:
-                    future_symbols_dict[market['symbol']] = market
-        
-        future_symbols = list(future_symbols_dict.keys())
-        future_symbols.sort() # Sort alphabetically for easy selection
+        exchange = exchange_class({'enableRateLimit': True,})
+        markets = exchange.load_markets()
+        future_symbols = []
+        for market_id, market in markets.items():
+            is_future = market.get('spot', False) is False and (
+                market.get('linear', False) or market.get('inverse', False) or market.get('contract', False))
+            is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
+            if is_future and is_usdt_usd_settled and market['active']:
+                future_symbols.append(market['symbol'])
+        future_symbols.sort()
         return future_symbols
     except ccxt.NetworkError as e:
-        st.error(f"Network error fetching symbols from {exchange_id}: {e}. This might be due to general network issues or geographical restrictions. Please check your network/location or try a different exchange.")
-        return []
+        st.error(f"Network error fetching symbols from {exchange_id}: {e}")
+        return[]
     except ccxt.ExchangeError as e:
-        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}. Please check the exchange status or your API permissions.")
-        return []
+        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}")
+        return[]
     except Exception as e:
         st.error(f"An unexpected error occurred while fetching symbols: {e}")
-        return []
+        return[]
 
-# --- Streamlit UI ---
-st.title("Crypto Pivot Analyzer with ML Forecasting")
-
+st.title("Crypto Pivot Analyzer")
 st.sidebar.header("Configuration")
-# Use st.session_state to store and update selected exchange
 selected_exchange_id = st.sidebar.selectbox(
-    "Select Exchange", 
-    ('bybit', 'binance', 'coinbasepro'), 
+    "Select Exchange",
+    ('bybit', 'binance', 'coinbasepro'),
     index=0,
     key='exchange_selected'
 )
-
-# Fetch symbols based on the selected exchange
 all_available_symbols = fetch_all_future_symbols(selected_exchange_id)
-
-# Set a default symbol, or use the first available one if the previous default is not in the list
 default_symbol_index = 0
-if 'BTC/USDT:USDT' in all_available_symbols: # Common Bybit/Binance perpetual
+if 'BTC/USDT:USDT' in all_available_symbols:
     default_symbol_index = all_available_symbols.index('BTC/USDT:USDT')
+elif 'BTC/USD:USD' in all_available_symbols:
+    default_symbol_index = all_available_symbols.index('BTC/USD:USD')
 elif all_available_symbols:
-    default_symbol_index = 0 # Fallback to the first symbol if common ones not found
+    default_symbol_index = 0
 else:
-    default_symbol_index = None # No symbols available
-
+    default_symbol_index = None
 if all_available_symbols:
     symbol = st.sidebar.selectbox(
-        "Select Symbol", 
-        options=all_available_symbols, 
+        "Select Symbol",
+        options=all_available_symbols,
         index=default_symbol_index if default_symbol_index is not None else 0,
         key='symbol_selected'
     )
 else:
     symbol = st.sidebar.text_input("Enter Symbol (e.g., BTC/USDT)", "BTC/USDT", help="No symbols fetched for the selected exchange. Please enter manually.")
-
 timeframe = st.sidebar.selectbox("Select Timeframe", ('1m', '5m', '15m', '1h', '4h', '1d'), index=0, key='timeframe_selected')
-
 limit = st.sidebar.slider("Number of Candles (Data Points)", 150, 200, 100)
-
 st.sidebar.subheader("Turning Point Parameters")
 st.sidebar.info("Turning points are identified using the sign of the first differences on the raw price data.")
 
-st.sidebar.subheader("Machine Learning Parameters")
-future_horizon = st.sidebar.slider("Future Horizon (Candles)", 1, 10, 5)
-prediction_threshold = st.sidebar.slider("Prediction Probability Threshold", 0.05, 0.95, 0.3, 0.05)
+# Define timeframe_duration_map for calculating candle durations
+timeframe_duration_map = {'1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440}
 
-st.sidebar.info("Adjust 'Future Horizon' for how far ahead to predict pivots. 'Prediction Probability Threshold' controls the confidence level for showing predictions.")
-
-# --- Main Logic ---
 if st.sidebar.button("Fetch Data and Run Analysis"):
     st.subheader("Data Fetching")
     try:
-        # Use the selected exchange from the selectbox
-        exchange = getattr(ccxt, selected_exchange_id)({
-            'enableRateLimit': True,
-        })
+        exchange = getattr(ccxt, selected_exchange_id)({'enableRateLimit': True,})
         st.write(f"Fetching data for {symbol} from {selected_exchange_id}...")
-
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-
         if df.empty:
             st.error("No data fetched. Please check symbol, timeframe, or exchange.")
             st.stop()
-
         st.success(f"Successfully fetched {len(df)} candles.")
         st.dataframe(df.tail())
-
         st.subheader("Turning Point Calculation")
         turning_points = find_turning_points(df['Close'])
-
         if not turning_points:
             st.warning("No turning points confirmed with the current method. Ensure sufficient data points.")
             confirmed_turning_point_indices = []
         else:
             confirmed_turning_point_indices = [p[0] for p in turning_points]
             st.success(f"Found {len(confirmed_turning_point_indices)} confirmed turning points.")
-
-        # --- Display Last 20 Turning Points ---
+        
         st.subheader("Last 20 Turning Points")
         if turning_points:
-            sorted_turning_points = sorted(turning_points, key=lambda x: x[0], reverse=True) 
-            
+            sorted_turning_points = sorted(turning_points, key=lambda x:x[0], reverse=True)
             minima_display = []
             maxima_display = []
-
             recent_points = sorted_turning_points[:20]
-            recent_points.sort(key=lambda x: x[0]) 
-
+            recent_points.sort(key=lambda x:x[0])
             for p in recent_points:
                 if p[2] == -1:
                     minima_display.append(p)
                 elif p[2] == 1:
                     maxima_display.append(p)
-
             st.write("#### Local Minima (Last 20)")
             if minima_display:
-                minima_df = pd.DataFrame(minima_display, columns=['Timestamp', 'Price', 'Type'])
-                minima_df['Type'] = 'Minima' 
+                minima_df = pd.DataFrame(minima_display, columns=['Timestamp','Price','Type'])
+                minima_df['Type'] = 'Minima'
                 minima_df['Timestamp'] = minima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
                 st.dataframe(minima_df.set_index('Timestamp'))
             else:
                 st.info("No local minima detected in the last 20 turning points.")
-
             st.write("#### Local Maxima (Last 20)")
             if maxima_display:
-                maxima_df = pd.DataFrame(maxima_display, columns=['Timestamp', 'Price', 'Type'])
-                maxima_df['Type'] = 'Maxima' 
+                maxima_df = pd.DataFrame(maxima_display, columns=['Timestamp','Price','Type'])
+                maxima_df['Type'] = 'Maxima'
                 maxima_df['Timestamp'] = maxima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
                 st.dataframe(maxima_df.set_index('Timestamp'))
             else:
                 st.info("No local maxima detected in the last 20 turning points.")
         else:
             st.info("No turning points to display in the table.")
-
-        # --- Buy/Sell Signals Table ---
+        
         st.subheader("Buy/Sell Signals from Turning Points")
         if turning_points:
             signals_data = []
-            for point in sorted(turning_points, key=lambda x: x[0]): 
+            for point in sorted(turning_points, key=lambda x:x[0]):
                 signal_type = "Buy" if point[2] == -1 else "Sell"
                 signals_data.append({
                     'Timestamp': point[0].strftime('%Y-%m-%d %H:%M:%S'),
-                    'Price': f"{point[1]:.4f}", 
+                    'Price': f"{point[1]:.4f}",
                     'Signal': signal_type
                 })
-            
             if signals_data:
                 signals_df = pd.DataFrame(signals_data)
                 st.dataframe(signals_df.tail(20).set_index('Timestamp'))
@@ -472,149 +169,170 @@ if st.sidebar.button("Fetch Data and Run Analysis"):
         else:
             st.info("No turning points detected to generate buy/sell signals.")
 
-        # --- Feature Engineering ---
-        st.subheader("Feature Engineering")
-        Lags = [1, 2, 3, 5, 10]
-        df_lags = add_lagged_features(df, Lags)
-        df_indicators = add_technical_indicators(df_lags)
-        df_features_labels = create_features_and_labels(df_indicators, turning_points, future_horizon)
+        st.subheader("Turning Point Cycle Metrics")
+        cycle_metrics_data = []
+        current_timeframe_duration = timeframe_duration_map.get(timeframe, 1)
 
-        st.write("Generated features and labels:")
-        st.dataframe(df_features_labels.tail())
+        if len(turning_points) > 1:
+            for i in range(1, len(turning_points)):
+                prev_point = turning_points[i-1]
+                current_point = turning_points[i]
 
-        feature_columns = [col for col in df_features_labels.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'is_pivot', 'pivot_type', 'future_pivot', 'pivot_type_encoded', 'BB_Middle', 'BB_Upper', 'BB_Lower']]
-        feature_columns = [col for col in feature_columns if not df_features_labels[col].isnull().all()] 
-                                
-                                # --- Machine Learning Models ---
-        st.subheader("Machine Learning Model Training")
-        st.info("Training XGBoost for 'future_pivot' prediction (Is there a pivot in the next X candles?).")
-        xgboost_model, _, _, _, _ = train_xgboost_model(df_features_labels, feature_columns, 'future_pivot')
-        st.info("SVM model removed as per request.")
+                time_diff_timedelta = current_point[0] - prev_point[0]
+                duration_in_minutes = time_diff_timedelta.total_seconds() / 60
+                duration_in_candles = duration_in_minutes / current_timeframe_duration
 
-        # --- Predictions ---
-        st.subheader("Forecasting Future Pivots")
-        future_pivots_plot = []
-        num_future_pivots_xgboost = 0
+                price_change_abs = current_point[1] - prev_point[1]
+                price_change_pct = (price_change_abs / prev_point[1]) * 100 if prev_point[1] != 0 else 0
 
-        if xgboost_model:
-            xgboost_predicted_pivots, num_future_pivots_xgboost = predict_next_pivots(
-                xgboost_model, df_features_labels, feature_columns, future_horizon, prediction_threshold
-            )
-            future_pivots_plot.extend(xgboost_predicted_pivots)
-            st.info(f"XGBoost predicted {num_future_pivots_xgboost} future pivot events.")
-        else:
-            st.warning("XGBoost model not trained. Cannot make future pivot predictions.")
-        
-        total_predicted_pivots = len(future_pivots_plot)
-        if total_predicted_pivots == 0:
-            st.info("No potential future pivots predicted based on current data and threshold.")
-        else:
-            st.success(f"Found {total_predicted_pivots} potential future pivots.")
-
-        # --- Visualization ---
-        st.write("---")
-        st.subheader("Crypto Price Chart with Turning Points and ML Predicted Pivots")
-
-        st.write(f"Confirmed Turning Point Indices count: {len(confirmed_turning_point_indices)}")
-        st.write(f"Future Pivots to Plot count: {len(future_pivots_plot)}")
-
-        fig, ax1 = plt.subplots(figsize=(15, 8))
-
-        ax1.plot(df.index, df['Close'], label='Close Price', color='blue', linewidth=1.5)
-
-        if turning_points and len(turning_points) > 0:
-            min_points_x = [p[0] for p in turning_points if p[2] == -1]
-            min_points_y = [p[1] for p in turning_points if p[2] == -1]
-            max_points_x = [p[0] for p in turning_points if p[2] == 1]
-            max_points_y = [p[1] for p in turning_points if p[2] == 1]
+                cycle_metrics_data.append({
+                    'Start Timestamp': prev_point[0],
+                    'End Timestamp': current_point[0],
+                    'Start Price': prev_point[1],
+                    'End Price': current_point[1],
+                    'Type': f"{'Min to Max' if prev_point[2] == -1 and current_point[2] == 1 else 'Max to Min' if prev_point[2] == 1 and current_point[2] == -1 else 'N/A'}",
+                    'Duration (Candles)': duration_in_candles,
+                    'Duration (Minutes)': duration_in_minutes,
+                    'Price Change %': price_change_pct
+                })
             
+            cycle_metrics_df = pd.DataFrame(cycle_metrics_data)
+            # Format columns for display
+            cycle_metrics_df_display = cycle_metrics_df.copy()
+            cycle_metrics_df_display['Start Timestamp'] = cycle_metrics_df_display['Start Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            cycle_metrics_df_display['End Timestamp'] = cycle_metrics_df_display['End Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            cycle_metrics_df_display['Start Price'] = cycle_metrics_df_display['Start Price'].apply(lambda x: f"{x:.4f}")
+            cycle_metrics_df_display['End Price'] = cycle_metrics_df_display['End Price'].apply(lambda x: f"{x:.4f}")
+            cycle_metrics_df_display['Duration (Candles)'] = cycle_metrics_df_display['Duration (Candles)'].apply(lambda x: f"{x:.1f}")
+            cycle_metrics_df_display['Duration (Minutes)'] = cycle_metrics_df_display['Duration (Minutes)'].apply(lambda x: f"{x:.0f}")
+            cycle_metrics_df_display['Price Change %'] = cycle_metrics_df_display['Price Change %'].apply(lambda x: f"{x:.2f}%")
+
+            st.dataframe(cycle_metrics_df_display)
+        else:
+            st.info("Not enough turning points to calculate cycle metrics (need at least 2 points).")
+
+        st.subheader("Projected Next Turning Point")
+        if len(cycle_metrics_data) > 0:
+            avg_duration_candles = cycle_metrics_df['Duration (Candles)'].mean()
+            avg_duration_minutes = cycle_metrics_df['Duration (Minutes)'].mean()
+            avg_price_change_abs = cycle_metrics_df['End Price'].sub(cycle_metrics_df['Start Price']).abs().mean()
+            
+            last_turning_point = turning_points[-1]
+            last_price = last_turning_point[1]
+            last_timestamp = last_turning_point[0]
+            last_type = last_turning_point[2] # -1 for min, 1 for max
+
+            # Project next time based on average duration
+            projected_next_time = last_timestamp + pd.to_timedelta(avg_duration_minutes, unit='m')
+
+            # Project next price based on average price change
+            # If last was a minimum, project an increase; if a maximum, project a decrease
+            if last_type == -1: # Last was a minimum, next is likely a maximum
+                projected_next_price = last_price + avg_price_change_abs
+                projected_type_str = "Potential Maxima"
+            else: # Last was a maximum, next is likely a minimum
+                projected_next_price = last_price - avg_price_change_abs
+                projected_type_str = "Potential Minima"
+            
+            st.success(f"Based on historical cycles, the next potential turning point is a {projected_type_str}:")
+            st.markdown(f"- **Time:** {projected_next_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            st.markdown(f"- **Price:** {projected_next_price:.4f}")
+            st.markdown(f"- **Projected Cycle Duration:** {avg_duration_candles:.1f} candles ({avg_duration_minutes:.0f} minutes)")
+        else:
+            st.info("Not enough historical cycles to project the next turning point.")
+
+        st.subheader("Backtested Turning Point Extrapolation Performance")
+        if len(cycle_metrics_data) > 1: # Need at least two full cycles to evaluate a prediction
+            time_deviations_minutes = []
+            price_deviations_pct = []
+
+            for i in range(len(cycle_metrics_data) - 1): # Iterate through cycles, predicting the next one
+                # Calculate average metrics up to this point (non-repainting for this backtest)
+                historical_cycles_for_avg = cycle_metrics_df.iloc[:i+1]
+                avg_hist_duration_minutes = historical_cycles_for_avg['Duration (Minutes)'].mean()
+                
+                # Determine the expected price change direction for the next cycle
+                # This depends on the type of the 'Start Timestamp' of the *next* actual cycle (i.e., End Timestamp of current cycle)
+                # If current cycle ends in a Max (type 1), next starts with a Min (-1), so price change is negative
+                # If current cycle ends in a Min (type -1), next starts with a Max (1), so price change is positive
+                
+                # Check the type of the last point of the current cycle (which is the start of the *next* cycle's target)
+                # The 'Type' column in cycle_metrics_df indicates the type of transition (Min to Max or Max to Min)
+                # We need the 'type' of the `End Timestamp` of the current cycle for the projection
+                
+                current_cycle_end_point_type = turning_points[i+1][2] # Type of the second point in the current cycle_metrics_data row
+                avg_hist_price_change_abs = historical_cycles_for_avg['End Price'].sub(historical_cycles_for_avg['Start Price']).abs().mean()
+
+                # 'Forecast' the next turning point
+                forecast_start_time = cycle_metrics_df.iloc[i]['End Timestamp']
+                forecasted_end_time = forecast_start_time + pd.to_timedelta(avg_hist_duration_minutes, unit='m')
+                
+                forecast_start_price = cycle_metrics_df.iloc[i]['End Price']
+                if current_cycle_end_point_type == -1: # Current cycle ended at a minimum (prev was max)
+                    # Next cycle will go up, so expect a positive price change
+                    forecasted_end_price = forecast_start_price + avg_hist_price_change_abs
+                else: # Current cycle ended at a maximum (prev was min)
+                    # Next cycle will go down, so expect a negative price change
+                    forecasted_end_price = forecast_start_price - avg_hist_price_change_abs
+
+                # Compare with the actual next turning point
+                actual_next_cycle_start_time = cycle_metrics_df.iloc[i+1]['Start Timestamp']
+                actual_next_cycle_start_price = cycle_metrics_df.iloc[i+1]['Start Price']
+
+                time_deviation_minutes = abs((forecasted_end_time - actual_next_cycle_start_time).total_seconds() / 60)
+                price_deviation_pct = abs((forecasted_end_price - actual_next_cycle_start_price) / actual_next_cycle_start_price) * 100 if actual_next_cycle_start_price != 0 else 0
+
+                time_deviations_minutes.append(time_deviation_minutes)
+                price_deviations_pct.append(price_deviation_pct)
+            
+            if time_deviations_minutes:
+                avg_time_deviation_minutes = np.mean(time_deviations_minutes)
+                avg_price_deviation_pct = np.mean(price_deviations_pct)
+                
+                st.success("Average historical accuracy of extrapolating turning points:")
+                st.markdown(f"- **Average Time Deviation (Delay):** {avg_time_deviation_minutes:.0f} minutes (or {avg_time_deviation_minutes / current_timeframe_duration:.1f} candles)")
+                st.markdown(f"- **Average Price Deviation % (Error):** {avg_price_deviation_pct:.2f}%")
+                st.info("This indicates how consistently historical turning point patterns (duration and price change) repeat themselves.")
+            else:
+                st.info("Not enough historical cycles to perform backtested extrapolation analysis.")
+        else:
+            st.info("Not enough historical cycles to perform backtested extrapolation analysis (need at least 2 complete cycles).")
+
+        st.write("---")
+        st.subheader("Crypto Price Chart with Turning Points")
+        fig,ax1 = plt.subplots(figsize=(15,8))
+        ax1.plot(df.index,df['Close'],label='Close Price',color='blue',linewidth=1.5)
+        if turning_points and len(turning_points)>0:
+            min_points_x=[p[0]for p in turning_points if p[2]==-1]
+            min_points_y=[p[1]for p in turning_points if p[2]==-1]
+            max_points_x=[p[0]for p in turning_points if p[2]==1]
+            max_points_y=[p[1]for p in turning_points if p[2]==1]
             if min_points_x:
-                ax1.plot(min_points_x, min_points_y, 'o', color='red', markersize=6, label='Local Minimums')
-
+                ax1.plot(min_points_x,min_points_y,'o',color='red',markersize=6,label='Local Minimums')
             if max_points_x:
-                ax1.plot(max_points_x, max_points_y, 'o', color='green', markersize=6, label='Local Maximums')
-
+                ax1.plot(max_points_x,max_points_y,'o',color='green',markersize=6,label='Local Maximums')
         else:
             st.warning("No turning points detected to plot. Chart will only show price data.")
+        
+        # Plot projected next turning point
+        if 'projected_next_time' in locals() and 'projected_next_price' in locals():
+            ax1.axvline(x=projected_next_time, color='purple', linestyle=':', linewidth=1.5, label='Projected Next Pivot')
+            ax1.plot(projected_next_time, projected_next_price, 'X', color='purple', markersize=10, label='Projected Pivot Point')
+            ax1.annotate(f'Projected {projected_type_str}\n@ {projected_next_price:.4f}',
+                         xy=(projected_next_time, projected_next_price),
+                         xytext=(projected_next_time, projected_next_price + (df['Close'].max() - df['Close'].min()) * 0.05),
+                         arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5),
+                         horizontalalignment='center', verticalalignment='bottom', color='purple', fontsize=9,
+                         bbox=dict(boxstyle="round,pad=0.3", fc="lightblue", ec="b", lw=1, alpha=0.6))
 
-        if future_pivots_plot:
-            for pivot in future_pivots_plot: 
-                time_dt = pivot['time']
-                price = pivot['price']
-                pivot_type = pivot['type']
-                probability = pivot['probability']
 
-                ax1.axvline(x=time_dt, color='purple', linestyle=':', linewidth=1.5, label='Predicted Pivot' if pivot == future_pivots_plot[0] else "")
-                ax1.annotate(f'{pivot_type}\nProb: {probability:.2f}',
-                                    xy=(time_dt, price),
-                                    xytext=(time_dt, price + (df['Close'].max() - df['Close'].min()) * 0.05),
-                                    arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5),
-                                    horizontalalignment='center', verticalalignment='bottom', color='purple', fontsize=9,
-                                    bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="b", lw=1, alpha=0.6))
-            st.success("Future pivot predictions plotted.")
-        else:
-            st.info("No future pivots to plot.")
-
-        ax1.set_title(f"{symbol} Price Chart with Turning Points and ML Predicted Pivots ({timeframe})")
+        ax1.set_title(f"{symbol} Price Chart with Turning Points ({timeframe})")
         ax1.set_xlabel("Time")
         ax1.set_ylabel("Price")
         ax1.grid(True)
         ax1.legend()
         fig.autofmt_xdate()
-
         st.pyplot(fig)
-        
-        # --- Chart with Line of Best Fit and Error ---
-        st.write("---")
-        st.subheader("Turning Points with Line of Best Fit and Residuals")
-
-        if turning_points:
-            turning_point_df = pd.DataFrame(turning_points, columns=['timestamp', 'price', 'type'])
-            
-            X_tp = (turning_point_df['timestamp'].astype(np.int64) // 10**9).values.reshape(-1, 1)
-            y_tp = turning_point_df['price'].values
-
-            if len(X_tp) > 1:
-                model_lr = LinearRegression()
-                model_lr.fit(X_tp, y_tp)
-                
-                y_pred_lr = model_lr.predict(X_tp)
-
-                fig_lr, ax_lr = plt.subplots(figsize=(15, 8))
-
-                x_plot_dt = pd.to_datetime(X_tp.flatten() * 10**9)
-
-                min_points_x_plot = [p_dt for p_dt, p_type in zip(x_plot_dt, turning_point_df['type']) if p_type == -1]
-                min_points_y_plot = [p_y for p_y, p_type in zip(turning_point_df['price'], turning_point_df['type']) if p_type == -1]
-                max_points_x_plot = [p_dt for p_dt, p_type in zip(x_plot_dt, turning_point_df['type']) if p_type == 1]
-                max_points_y_plot = [p_y for p_y, p_type in zip(turning_point_df['price'], turning_point_df['type']) if p_type == 1]
-
-                if min_points_x_plot:
-                    ax_lr.plot(min_points_x_plot, min_points_y_plot, 'o', color='red', markersize=6, label='Local Minimums')
-                if max_points_x_plot:
-                    ax_lr.plot(max_points_x_plot, max_points_y_plot, 'o', color='green', markersize=6, label='Local Maximums')
-
-                ax_lr.plot(x_plot_dt, y_pred_lr, color='blue', linestyle='--', label='Line of Best Fit')
-
-                for i in range(len(turning_point_df)):
-                    tp_time_dt = turning_point_df['timestamp'].iloc[i]
-                    tp_price = turning_point_df['price'].iloc[i]
-                    predicted_price_at_tp = y_pred_lr[i]
-                    
-                    ax_lr.plot([tp_time_dt, tp_time_dt], [tp_price, predicted_price_at_tp], color='gray', linestyle=':', linewidth=0.8)
-
-                ax_lr.set_title("Turning Points with Line of Best Fit and Residuals") 
-                ax_lr.set_xlabel("Time")
-                ax_lr.set_ylabel("Price")
-                ax_lr.grid(True)
-                ax_lr.legend()
-                fig_lr.autofmt_xdate()
-                st.pyplot(fig_lr)
-            else:
-                st.info("Not enough turning points to compute a line of best fit (need at least 2 points).")
-        else:
-            st.info("No turning points detected to plot the line of best fit.")
-
     except ccxt.NetworkError as e:
         st.error(f"Network error: {e}. Please check your internet connection or try again later.")
     except ccxt.ExchangeError as e:
