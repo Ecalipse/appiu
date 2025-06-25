@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import requests
 from datetime import datetime, timedelta
+import time
 
 st.set_page_config(layout="wide", page_title="Crypto Pivot Analyzer")
 
@@ -39,76 +40,24 @@ def find_turning_points(df_close_prices):
                         filtered_turning_points[-1] = current_point
     return filtered_turning_points
 
-@st.cache_data(ttl=3600)
-def fetch_all_future_symbols(exchange_id):
-    try:
-        # Create exchange with sandbox mode and different configuration
-        exchange_config = {
-            'enableRateLimit': True,
-            'timeout': 30000,
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        }
-        
-        # Add proxy configuration if needed (uncomment and configure if you have a proxy)
-        # exchange_config['proxies'] = {
-        #     'http': 'your-proxy-url',
-        #     'https': 'your-proxy-url'
-        # }
-        
-        exchange_class = getattr(ccxt, exchange_id)
-        exchange = exchange_class(exchange_config)
-        
-        # Try to load markets with error handling
-        try:
-            markets = exchange.load_markets()
-        except ccxt.NetworkError as e:
-            if "403" in str(e) or "Forbidden" in str(e):
-                st.warning(f"⚠️ {exchange_id.title()} is blocking requests from your location. Trying fallback method...")
-                return get_fallback_symbols(exchange_id)
-            else:
-                raise e
-        
-        future_symbols = []
-        for market_id, market in markets.items():
-            is_future = market.get('spot', False) is False and (
-                market.get('linear', False) or market.get('inverse', False) or market.get('contract', False))
-            is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
-            if is_future and is_usdt_usd_settled and market['active']:
-                future_symbols.append(market['symbol'])
-        future_symbols.sort()
-        return future_symbols
-    except ccxt.NetworkError as e:
-        if "403" in str(e) or "Forbidden" in str(e):
-            st.warning(f"⚠️ {exchange_id.title()} is blocking requests from your location. Using fallback symbols...")
-            return get_fallback_symbols(exchange_id)
-        else:
-            st.error(f"Network error fetching symbols from {exchange_id}: {e}")
-            return get_fallback_symbols(exchange_id)
-    except ccxt.ExchangeError as e:
-        st.error(f"Exchange error fetching symbols from {exchange_id}: {e}")
-        return get_fallback_symbols(exchange_id)
-    except Exception as e:
-        st.error(f"An unexpected error occurred while fetching symbols: {e}")
-        return get_fallback_symbols(exchange_id)
-
-def get_fallback_symbols(exchange_id):
-    """Return common futures symbols when API is blocked"""
-    common_symbols = {
-        'bybit': [
-            'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT',
-            'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'DOT/USDT:USDT',
-            'MATIC/USDT:USDT', 'LINK/USDT:USDT', 'UNI/USDT:USDT', 'LTC/USDT:USDT',
-            'BCH/USDT:USDT', 'NEAR/USDT:USDT', 'ICP/USDT:USDT', 'FTM/USDT:USDT',
-            'ATOM/USDT:USDT', 'XLM/USDT:USDT', 'ALGO/USDT:USDT', 'VET/USDT:USDT'
-        ],
+def get_predefined_symbols(exchange_id):
+    """Get predefined symbol lists to avoid API calls that might be blocked"""
+    symbols = {
         'binance': [
             'BTC/USDT:USDT', 'ETH/USDT:USDT', 'BNB/USDT:USDT', 'SOL/USDT:USDT',
             'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'DOT/USDT:USDT',
             'MATIC/USDT:USDT', 'LINK/USDT:USDT', 'UNI/USDT:USDT', 'LTC/USDT:USDT',
             'BCH/USDT:USDT', 'NEAR/USDT:USDT', 'ICP/USDT:USDT', 'FTM/USDT:USDT',
-            'ATOM/USDT:USDT', 'XLM/USDT:USDT', 'ALGO/USDT:USDT', 'VET/USDT:USDT'
+            'ATOM/USDT:USDT', 'XLM/USDT:USDT', 'ALGO/USDT:USDT', 'VET/USDT:USDT',
+            'DOGE/USDT:USDT', 'SHIB/USDT:USDT', 'TRX/USDT:USDT', 'ETC/USDT:USDT'
+        ],
+        'bybit': [
+            'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT',
+            'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'DOT/USDT:USDT',
+            'MATIC/USDT:USDT', 'LINK/USDT:USDT', 'UNI/USDT:USDT', 'LTC/USDT:USDT',
+            'BCH/USDT:USDT', 'NEAR/USDT:USDT', 'ICP/USDT:USDT', 'FTM/USDT:USDT',
+            'ATOM/USDT:USDT', 'XLM/USDT:USDT', 'ALGO/USDT:USDT', 'VET/USDT:USDT',
+            'DOGE/USDT:USDT', 'SHIB/USDT:USDT', 'TRX/USDT:USDT', 'ETC/USDT:USDT'
         ],
         'coinbasepro': [
             'BTC/USD:USD', 'ETH/USD:USD', 'SOL/USD:USD', 'XRP/USD:USD',
@@ -117,387 +66,431 @@ def get_fallback_symbols(exchange_id):
             'NEAR/USD:USD', 'ICP/USD:USD', 'FTM/USD:USD', 'ATOM/USD:USD'
         ]
     }
-    return common_symbols.get(exchange_id, ['BTC/USDT:USDT', 'ETH/USDT:USDT'])
+    return symbols.get(exchange_id, symbols['binance'])
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_ohlcv_data(exchange_id, symbol, timeframe, limit):
-    """Fetch OHLCV data with error handling for geo-blocking"""
+@st.cache_data(ttl=3600)
+def fetch_symbols_safe(exchange_id):
+    """Safely fetch symbols with fallback to predefined lists"""
     try:
-        exchange_config = {
-            'enableRateLimit': True,
-            'timeout': 30000,
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        }
-        
+        # First try with minimal configuration
         exchange_class = getattr(ccxt, exchange_id)
-        exchange = exchange_class(exchange_config)
+        exchange = exchange_class({
+            'enableRateLimit': True,
+            'timeout': 10000,  # Shorter timeout
+            'headers': {
+                'User-Agent': 'ccxt/python'
+            }
+        })
         
-        # Try to fetch data
+        # Add a small delay to be respectful
+        time.sleep(0.5)
+        
+        markets = exchange.load_markets()
+        future_symbols = []
+        
+        for market_id, market in markets.items():
+            is_future = market.get('spot', False) is False and (
+                market.get('linear', False) or market.get('inverse', False) or market.get('contract', False))
+            is_usdt_usd_settled = market.get('settleId') in ['USDT', 'USD']
+            if is_future and is_usdt_usd_settled and market['active']:
+                future_symbols.append(market['symbol'])
+        
+        future_symbols.sort()
+        
+        if future_symbols:
+            st.success(f"✅ Successfully loaded {len(future_symbols)} symbols from {exchange_id}")
+            return future_symbols
+        else:
+            st.warning(f"⚠️ No futures symbols found for {exchange_id}, using predefined list")
+            return get_predefined_symbols(exchange_id)
+            
+    except Exception as e:
+        if "403" in str(e) or "Forbidden" in str(e):
+            st.warning(f"🚫 {exchange_id.title()} API blocked from your location. Using predefined symbols.")
+        else:
+            st.warning(f"⚠️ Error fetching symbols from {exchange_id}: {str(e)[:100]}... Using predefined symbols.")
+        
+        return get_predefined_symbols(exchange_id)
+
+@st.cache_data(ttl=300)
+def fetch_ohlcv_safe(exchange_id, symbol, timeframe, limit):
+    """Safely fetch OHLCV data with better error handling"""
+    try:
+        exchange_class = getattr(ccxt, exchange_id)
+        exchange = exchange_class({
+            'enableRateLimit': True,
+            'timeout': 20000,
+            'headers': {
+                'User-Agent': 'ccxt/python'
+            }
+        })
+        
+        # Add delay to be respectful to the API
+        time.sleep(1)
+        
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        
+        if not ohlcv:
+            return None, "No data returned from exchange"
+        
         return ohlcv, None
         
     except ccxt.NetworkError as e:
         if "403" in str(e) or "Forbidden" in str(e):
-            error_msg = f"🚫 {exchange_id.title()} is blocking requests from your deployment location due to geographical restrictions."
-            return None, error_msg
+            return None, f"🚫 {exchange_id.title()} blocked your location. Try a different exchange or deploy from another region."
+        elif "429" in str(e):
+            return None, f"⏰ Rate limited by {exchange_id}. Please wait and try again."
         else:
-            error_msg = f"Network error: {e}"
-            return None, error_msg
+            return None, f"🌐 Network error: {str(e)[:100]}..."
     except ccxt.ExchangeError as e:
-        error_msg = f"Exchange error: {e}"
-        return None, error_msg
+        return None, f"🏛️ Exchange error: {str(e)[:100]}..."
     except Exception as e:
-        error_msg = f"Unexpected error: {e}"
-        return None, error_msg
+        return None, f"❌ Unexpected error: {str(e)[:100]}..."
 
+# Main UI
 st.title("🚀 Crypto Pivot Analyzer")
 
-# Add information about geo-blocking
-st.info("""
-**Note:** Some exchanges may block requests from certain locations due to geographical restrictions. 
-If you encounter 403 errors, try:
-1. Using a different exchange (Binance usually has fewer restrictions)
-2. Deploying your app from a different region
-3. Using a VPN-enabled hosting service
+# Alert box for geo-blocking issues
+st.error("""
+🚨 **IMPORTANT: Geographical Restrictions**
+Many crypto exchanges block certain regions. If you see 403 errors:
+1. **Try Binance first** (usually more accessible)
+2. **Use longer timeframes** (4h, 1d work better)
+3. **Deploy from US/EU regions** if possible
+4. **Consider using a VPN-enabled hosting service**
 """)
 
-st.sidebar.header("Configuration")
+st.sidebar.header("⚙️ Configuration")
 
-# Exchange selection with better error handling
-selected_exchange_id = st.sidebar.selectbox(
+# Exchange selection with better ordering
+exchange_options = {
+    'binance': '🟡 Binance (Recommended)',
+    'bybit': '🟠 Bybit (May be blocked)',
+    'coinbasepro': '🔵 Coinbase Pro'
+}
+
+selected_display = st.sidebar.selectbox(
     "Select Exchange",
-    ('binance', 'bybit', 'coinbasepro'),  # Put binance first as it's more reliable
+    list(exchange_options.values()),
     index=0,
-    key='exchange_selected',
-    help="Binance typically has fewer geographical restrictions"
+    help="Binance typically has the fewest geographical restrictions"
 )
 
-# Get symbols with fallback
-all_available_symbols = fetch_all_future_symbols(selected_exchange_id)
+# Get the actual exchange ID
+selected_exchange_id = [k for k, v in exchange_options.items() if v == selected_display][0]
+
+# Load symbols immediately (no caching issues)
+with st.spinner(f"Loading symbols for {selected_exchange_id}..."):
+    all_available_symbols = fetch_symbols_safe(selected_exchange_id)
 
 # Symbol selection
-default_symbol_index = 0
-if 'BTC/USDT:USDT' in all_available_symbols:
-    default_symbol_index = all_available_symbols.index('BTC/USDT:USDT')
-elif 'BTC/USD:USD' in all_available_symbols:
-    default_symbol_index = all_available_symbols.index('BTC/USD:USD')
-elif all_available_symbols:
-    default_symbol_index = 0
-else:
-    default_symbol_index = None
-
 if all_available_symbols:
+    # Find default symbol
+    default_symbol = 'BTC/USDT:USDT'
+    if 'BTC/USD:USD' in all_available_symbols:
+        default_symbol = 'BTC/USD:USD'
+    
+    try:
+        default_index = all_available_symbols.index(default_symbol)
+    except ValueError:
+        default_index = 0
+    
     symbol = st.sidebar.selectbox(
-        "Select Symbol",
+        "Select Trading Pair",
         options=all_available_symbols,
-        index=default_symbol_index if default_symbol_index is not None else 0,
-        key='symbol_selected'
+        index=default_index,
+        help=f"Loaded {len(all_available_symbols)} symbols"
     )
 else:
     symbol = st.sidebar.text_input(
         "Enter Symbol (e.g., BTC/USDT:USDT)", 
-        "BTC/USDT:USDT", 
-        help="No symbols fetched. Using fallback - enter manually if needed."
+        "BTC/USDT:USDT",
+        help="No symbols loaded - enter manually"
     )
 
-timeframe = st.sidebar.selectbox(
-    "Select Timeframe", 
-    ('1m', '5m', '15m', '1h', '4h', '1d'), 
-    index=3,  # Default to 1h for better reliability
-    key='timeframe_selected'
+# Timeframe selection
+timeframe_options = {
+    '1m': '1 Minute',
+    '5m': '5 Minutes', 
+    '15m': '15 Minutes',
+    '1h': '1 Hour (Recommended)',
+    '4h': '4 Hours (Recommended)',
+    '1d': '1 Day (Most Reliable)'
+}
+
+selected_tf_display = st.sidebar.selectbox(
+    "Select Timeframe",
+    list(timeframe_options.values()),
+    index=3,  # Default to 1h
+    help="Longer timeframes are more reliable and less likely to be blocked"
 )
 
-limit = st.sidebar.slider("Number of Candles (Data Points)", 50, 200, 100)
+timeframe = [k for k, v in timeframe_options.items() if v == selected_tf_display][0]
 
-st.sidebar.subheader("Turning Point Parameters")
-st.sidebar.info("Turning points are identified using the sign of the first differences on the raw price data.")
+# Limit selection
+limit = st.sidebar.slider(
+    "Number of Candles", 
+    min_value=50, 
+    max_value=200, 
+    value=100,
+    help="Fewer candles = faster loading, less likely to timeout"
+)
 
-# Add troubleshooting section
-with st.sidebar.expander("🔧 Troubleshooting"):
-    st.write("**If you get 403 errors:**")
-    st.write("1. Try Binance (usually more accessible)")
-    st.write("2. Use longer timeframes (1h, 4h, 1d)")
-    st.write("3. Reduce the number of candles")
-    st.write("4. Deploy from a different region")
+# Analysis parameters
+st.sidebar.subheader("📊 Analysis Settings")
+st.sidebar.info("Turning points are detected using price direction changes")
 
-# Define timeframe_duration_map for calculating candle durations
-timeframe_duration_map = {'1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440}
+# Add status indicator
+status_placeholder = st.sidebar.empty()
 
-if st.sidebar.button("Fetch Data and Run Analysis", type="primary"):
-    st.subheader("📊 Data Fetching")
+# Troubleshooting
+with st.sidebar.expander("🔧 Troubleshooting 403 Errors"):
+    st.markdown("""
+    **If you get blocked (403 errors):**
     
-    with st.spinner(f"Fetching data for {symbol} from {selected_exchange_id}..."):
-        ohlcv_data, error_msg = fetch_ohlcv_data(selected_exchange_id, symbol, timeframe, limit)
+    1. **Switch to Binance** - Usually works better
+    2. **Use 4h or 1d timeframes** - More reliable
+    3. **Reduce candle count** to 50-100
+    4. **Try different symbols** (BTC/ETH usually work)
+    5. **Deploy from US/EU** if possible
+    6. **Wait 5-10 minutes** then retry
+    
+    **Alternative hosting solutions:**
+    - Railway.app (multiple regions)
+    - Render.com (US-based)
+    - Fly.io (global regions)
+    - Heroku (US/EU regions)
+    """)
+
+# Define timeframe duration mapping
+timeframe_duration_map = {
+    '1m': 1, '5m': 5, '15m': 15, 
+    '1h': 60, '4h': 240, '1d': 1440
+}
+
+# Main analysis button
+if st.sidebar.button("🚀 Fetch Data & Analyze", type="primary"):
+    status_placeholder.info("🔄 Starting analysis...")
+    
+    # Create main content area
+    st.subheader(f"📊 Analysis for {symbol} on {selected_exchange_id.title()}")
+    
+    # Fetch data
+    with st.spinner(f"Fetching {limit} candles of {symbol} ({timeframe}) from {selected_exchange_id}..."):
+        ohlcv_data, error_msg = fetch_ohlcv_safe(selected_exchange_id, symbol, timeframe, limit)
     
     if error_msg:
-        st.error(error_msg)
-        if "403" in error_msg or "Forbidden" in error_msg:
-            st.error("**Geographical Restriction Detected!**")
+        st.error(f"**Data Fetch Failed:** {error_msg}")
+        
+        if "403" in error_msg or "blocked" in error_msg.lower():
             st.info("""
-            **Possible Solutions:**
-            1. **Try Binance**: Switch to Binance exchange (usually has fewer restrictions)
-            2. **Use VPN**: Deploy your app through a VPN-enabled hosting service
-            3. **Different Region**: Deploy from a different geographical region
-            4. **Alternative Hosting**: Consider using hosting services that support VPN or proxy
-            5. **Manual Data**: Use a CSV upload feature (would need to be implemented)
+            **🔧 Quick Fixes:**
+            1. Switch to **Binance** in the sidebar
+            2. Try **4h or 1d timeframe**
+            3. Use **BTC/USDT:USDT** symbol
+            4. Deploy your app from a **US or EU region**
             """)
+        
+        status_placeholder.error("❌ Analysis failed")
         st.stop()
     
-    if not ohlcv_data:
-        st.error("No data received. Please try different parameters.")
+    if not ohlcv_data or len(ohlcv_data) == 0:
+        st.error("No data received from the exchange")
+        status_placeholder.error("❌ No data")
         st.stop()
     
-    # Process the data
+    # Process data
     df = pd.DataFrame(ohlcv_data, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     
-    if df.empty:
-        st.error("No data fetched. Please check symbol, timeframe, or exchange.")
-        st.stop()
-    
     st.success(f"✅ Successfully fetched {len(df)} candles from {selected_exchange_id.title()}")
-    st.dataframe(df.tail())
+    status_placeholder.success("✅ Data loaded")
     
-    # Continue with the rest of your analysis code...
-    st.subheader("🔄 Turning Point Calculation")
+    # Show recent data
+    with st.expander("📋 Recent Price Data"):
+        st.dataframe(df.tail(10))
+    
+    # Find turning points
+    st.subheader("🔄 Turning Point Detection")
     turning_points = find_turning_points(df['Close'])
     
     if not turning_points:
-        st.warning("No turning points confirmed with the current method. Ensure sufficient data points.")
-        confirmed_turning_point_indices = []
-    else:
-        confirmed_turning_point_indices = [p[0] for p in turning_points]
-        st.success(f"Found {len(confirmed_turning_point_indices)} confirmed turning points.")
+        st.warning("⚠️ No turning points detected. Try:")
+        st.markdown("- Increasing the number of candles")
+        st.markdown("- Using a longer timeframe")
+        st.markdown("- Selecting a more volatile trading pair")
+        st.stop()
     
-    st.subheader("📈 Last 20 Turning Points")
+    st.success(f"🎯 Found {len(turning_points)} turning points")
+    
+    # Display turning points
     if turning_points:
-        sorted_turning_points = sorted(turning_points, key=lambda x:x[0], reverse=True)
-        minima_display = []
-        maxima_display = []
-        recent_points = sorted_turning_points[:20]
-        recent_points.sort(key=lambda x:x[0])
-        for p in recent_points:
-            if p[2] == -1:
-                minima_display.append(p)
-            elif p[2] == 1:
-                maxima_display.append(p)
-        
         col1, col2 = st.columns(2)
         
+        # Sort and filter points
+        sorted_turning_points = sorted(turning_points, key=lambda x: x[0], reverse=True)
+        recent_points = sorted_turning_points[:20]
+        recent_points.sort(key=lambda x: x[0])
+        
+        minima = [p for p in recent_points if p[2] == -1]
+        maxima = [p for p in recent_points if p[2] == 1]
+        
         with col1:
-            st.write("#### 🔴 Local Minima (Last 20)")
-            if minima_display:
-                minima_df = pd.DataFrame(minima_display, columns=['Timestamp','Price','Type'])
-                minima_df['Type'] = 'Minima'
-                minima_df['Timestamp'] = minima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            st.write("#### 🔴 Local Minima (Buy Signals)")
+            if minima:
+                minima_df = pd.DataFrame(minima, columns=['Timestamp', 'Price', 'Type'])
+                minima_df['Timestamp'] = minima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+                minima_df['Price'] = minima_df['Price'].apply(lambda x: f"{x:.4f}")
+                minima_df = minima_df.drop('Type', axis=1)
                 st.dataframe(minima_df.set_index('Timestamp'))
             else:
-                st.info("No local minima detected in the last 20 turning points.")
+                st.info("No minima in recent data")
         
         with col2:
-            st.write("#### 🟢 Local Maxima (Last 20)")
-            if maxima_display:
-                maxima_df = pd.DataFrame(maxima_display, columns=['Timestamp','Price','Type'])
-                maxima_df['Type'] = 'Maxima'
-                maxima_df['Timestamp'] = maxima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            st.write("#### 🟢 Local Maxima (Sell Signals)")
+            if maxima:
+                maxima_df = pd.DataFrame(maxima, columns=['Timestamp', 'Price', 'Type'])
+                maxima_df['Timestamp'] = maxima_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+                maxima_df['Price'] = maxima_df['Price'].apply(lambda x: f"{x:.4f}")
+                maxima_df = maxima_df.drop('Type', axis=1)
                 st.dataframe(maxima_df.set_index('Timestamp'))
             else:
-                st.info("No local maxima detected in the last 20 turning points.")
-    else:
-        st.info("No turning points to display in the table.")
+                st.info("No maxima in recent data")
     
-    st.subheader("💰 Buy/Sell Signals from Turning Points")
+    # Trading signals
+    st.subheader("💰 Trading Signals")
     if turning_points:
-        signals_data = []
-        for point in sorted(turning_points, key=lambda x:x[0]):
-            signal_type = "🟢 Buy" if point[2] == -1 else "🔴 Sell"
-            signals_data.append({
-                'Timestamp': point[0].strftime('%Y-%m-%d %H:%M:%S'),
+        signals = []
+        for point in sorted(turning_points, key=lambda x: x[0])[-10:]:  # Last 10 signals
+            signal_type = "🟢 BUY" if point[2] == -1 else "🔴 SELL"
+            signals.append({
+                'Time': point[0].strftime('%Y-%m-%d %H:%M'),
                 'Price': f"{point[1]:.4f}",
                 'Signal': signal_type
             })
-        if signals_data:
-            signals_df = pd.DataFrame(signals_data)
-            st.dataframe(signals_df.tail(20).set_index('Timestamp'))
-        else:
-            st.info("No buy/sell signals generated from turning points.")
-    else:
-        st.info("No turning points detected to generate buy/sell signals.")
-
-    st.subheader("📊 Turning Point Cycle Metrics")
-    cycle_metrics_data = []
-    current_timeframe_duration = timeframe_duration_map.get(timeframe, 1)
-
+        
+        if signals:
+            signals_df = pd.DataFrame(signals)
+            st.dataframe(signals_df.set_index('Time'))
+    
+    # Cycle analysis
+    st.subheader("📈 Cycle Analysis")
     if len(turning_points) > 1:
+        cycle_data = []
+        current_timeframe_duration = timeframe_duration_map.get(timeframe, 1)
+        
         for i in range(1, len(turning_points)):
             prev_point = turning_points[i-1]
             current_point = turning_points[i]
-
-            time_diff_timedelta = current_point[0] - prev_point[0]
-            duration_in_minutes = time_diff_timedelta.total_seconds() / 60
-            duration_in_candles = duration_in_minutes / current_timeframe_duration
-
-            price_change_abs = current_point[1] - prev_point[1]
-            price_change_pct = (price_change_abs / prev_point[1]) * 100 if prev_point[1] != 0 else 0
-
-            cycle_metrics_data.append({
-                'Start Timestamp': prev_point[0],
-                'End Timestamp': current_point[0],
-                'Start Price': prev_point[1],
-                'End Price': current_point[1],
-                'Type': f"{'Min to Max' if prev_point[2] == -1 and current_point[2] == 1 else 'Max to Min' if prev_point[2] == 1 and current_point[2] == -1 else 'N/A'}",
-                'Duration (Candles)': duration_in_candles,
-                'Duration (Minutes)': duration_in_minutes,
-                'Price Change %': price_change_pct
+            
+            time_diff = current_point[0] - prev_point[0]
+            duration_minutes = time_diff.total_seconds() / 60
+            duration_candles = duration_minutes / current_timeframe_duration
+            
+            price_change = current_point[1] - prev_point[1]
+            price_change_pct = (price_change / prev_point[1]) * 100 if prev_point[1] != 0 else 0
+            
+            cycle_type = "📈 Min→Max" if prev_point[2] == -1 and current_point[2] == 1 else "📉 Max→Min"
+            
+            cycle_data.append({
+                'Type': cycle_type,
+                'Duration (Candles)': f"{duration_candles:.1f}",
+                'Duration (Hours)': f"{duration_minutes/60:.1f}",
+                'Price Change %': f"{price_change_pct:.2f}%"
             })
         
-        cycle_metrics_df = pd.DataFrame(cycle_metrics_data)
-        # Format columns for display
-        cycle_metrics_df_display = cycle_metrics_df.copy()
-        cycle_metrics_df_display['Start Timestamp'] = cycle_metrics_df_display['Start Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        cycle_metrics_df_display['End Timestamp'] = cycle_metrics_df_display['End Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        cycle_metrics_df_display['Start Price'] = cycle_metrics_df_display['Start Price'].apply(lambda x: f"{x:.4f}")
-        cycle_metrics_df_display['End Price'] = cycle_metrics_df_display['End Price'].apply(lambda x: f"{x:.4f}")
-        cycle_metrics_df_display['Duration (Candles)'] = cycle_metrics_df_display['Duration (Candles)'].apply(lambda x: f"{x:.1f}")
-        cycle_metrics_df_display['Duration (Minutes)'] = cycle_metrics_df_display['Duration (Minutes)'].apply(lambda x: f"{x:.0f}")
-        cycle_metrics_df_display['Price Change %'] = cycle_metrics_df_display['Price Change %'].apply(lambda x: f"{x:.2f}%")
-
-        st.dataframe(cycle_metrics_df_display)
-    else:
-        st.info("Not enough turning points to calculate cycle metrics (need at least 2 points).")
-
-    st.subheader("🔮 Projected Next Turning Point")
-    if len(cycle_metrics_data) > 0:
-        avg_duration_candles = cycle_metrics_df['Duration (Candles)'].mean()
-        avg_duration_minutes = cycle_metrics_df['Duration (Minutes)'].mean()
-        avg_price_change_abs = cycle_metrics_df['End Price'].sub(cycle_metrics_df['Start Price']).abs().mean()
-        
-        last_turning_point = turning_points[-1]
-        last_price = last_turning_point[1]
-        last_timestamp = last_turning_point[0]
-        last_type = last_turning_point[2] # -1 for min, 1 for max
-
-        # Project next time based on average duration
-        projected_next_time = last_timestamp + pd.to_timedelta(avg_duration_minutes, unit='m')
-
-        # Project next price based on average price change
-        # If last was a minimum, project an increase; if a maximum, project a decrease
-        if last_type == -1: # Last was a minimum, next is likely a maximum
-            projected_next_price = last_price + avg_price_change_abs
-            projected_type_str = "Potential Maxima"
-            emoji = "🟢"
-        else: # Last was a maximum, next is likely a minimum
-            projected_next_price = last_price - avg_price_change_abs
-            projected_type_str = "Potential Minima"
-            emoji = "🔴"
-        
-        st.success(f"{emoji} Based on historical cycles, the next potential turning point is a {projected_type_str}:")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("📅 Projected Time", f"{projected_next_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        with col2:
-            st.metric("💰 Projected Price", f"{projected_next_price:.4f}")
-        with col3:
-            st.metric("⏱️ Cycle Duration", f"{avg_duration_candles:.1f} candles")
-    else:
-        st.info("Not enough historical cycles to project the next turning point.")
-
-    st.subheader("📈 Backtested Turning Point Extrapolation Performance")
-    if len(cycle_metrics_data) > 1: # Need at least two full cycles to evaluate a prediction
-        time_deviations_minutes = []
-        price_deviations_pct = []
-
-        for i in range(len(cycle_metrics_data) - 1): # Iterate through cycles, predicting the next one
-            # Calculate average metrics up to this point (non-repainting for this backtest)
-            historical_cycles_for_avg = cycle_metrics_df.iloc[:i+1]
-            avg_hist_duration_minutes = historical_cycles_for_avg['Duration (Minutes)'].mean()
+        if cycle_data:
+            cycle_df = pd.DataFrame(cycle_data)
+            st.dataframe(cycle_df)
             
-            current_cycle_end_point_type = turning_points[i+1][2] # Type of the second point in the current cycle_metrics_data row
-            avg_hist_price_change_abs = historical_cycles_for_avg['End Price'].sub(historical_cycles_for_avg['Start Price']).abs().mean()
-
-            # 'Forecast' the next turning point
-            forecast_start_time = cycle_metrics_df.iloc[i]['End Timestamp']
-            forecasted_end_time = forecast_start_time + pd.to_timedelta(avg_hist_duration_minutes, unit='m')
+            # Calculate averages for prediction
+            numeric_cycles = pd.DataFrame([
+                {
+                    'duration_candles': float(c['Duration (Candles)']),
+                    'duration_hours': float(c['Duration (Hours)']),
+                    'price_change_pct': float(c['Price Change %'].replace('%', ''))
+                }
+                for c in cycle_data
+            ])
             
-            forecast_start_price = cycle_metrics_df.iloc[i]['End Price']
-            if current_cycle_end_point_type == -1: # Current cycle ended at a minimum (prev was max)
-                # Next cycle will go up, so expect a positive price change
-                forecasted_end_price = forecast_start_price + avg_hist_price_change_abs
-            else: # Current cycle ended at a maximum (prev was min)
-                # Next cycle will go down, so expect a negative price change
-                forecasted_end_price = forecast_start_price - avg_hist_price_change_abs
-
-            # Compare with the actual next turning point
-            actual_next_cycle_start_time = cycle_metrics_df.iloc[i+1]['Start Timestamp']
-            actual_next_cycle_start_price = cycle_metrics_df.iloc[i+1]['Start Price']
-
-            time_deviation_minutes = abs((forecasted_end_time - actual_next_cycle_start_time).total_seconds() / 60)
-            price_deviation_pct = abs((forecasted_end_price - actual_next_cycle_start_price) / actual_next_cycle_start_price) * 100 if actual_next_cycle_start_price != 0 else 0
-
-            time_deviations_minutes.append(time_deviation_minutes)
-            price_deviations_pct.append(price_deviation_pct)
-        
-        if time_deviations_minutes:
-            avg_time_deviation_minutes = np.mean(time_deviations_minutes)
-            avg_price_deviation_pct = np.mean(price_deviations_pct)
+            avg_duration = numeric_cycles['duration_hours'].mean()
+            avg_price_change = abs(numeric_cycles['price_change_pct']).mean()
             
-            st.success("📊 Average historical accuracy of extrapolating turning points:")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("⏰ Average Time Deviation", f"{avg_time_deviation_minutes:.0f} minutes", f"{avg_time_deviation_minutes / current_timeframe_duration:.1f} candles")
-            with col2:
-                st.metric("📈 Average Price Deviation", f"{avg_price_deviation_pct:.2f}%")
-            
-            st.info("This indicates how consistently historical turning point patterns (duration and price change) repeat themselves.")
-        else:
-            st.info("Not enough historical cycles to perform backtested extrapolation analysis.")
-    else:
-        st.info("Not enough historical cycles to perform backtested extrapolation analysis (need at least 2 complete cycles).")
-
-    st.write("---")
-    st.subheader("📊 Crypto Price Chart with Turning Points")
-    fig,ax1 = plt.subplots(figsize=(15,8))
-    ax1.plot(df.index,df['Close'],label='Close Price',color='blue',linewidth=1.5)
-    if turning_points and len(turning_points)>0:
-        min_points_x=[p[0]for p in turning_points if p[2]==-1]
-        min_points_y=[p[1]for p in turning_points if p[2]==-1]
-        max_points_x=[p[0]for p in turning_points if p[2]==1]
-        max_points_y=[p[1]for p in turning_points if p[2]==1]
-        if min_points_x:
-            ax1.plot(min_points_x,min_points_y,'o',color='red',markersize=6,label='Local Minimums')
-        if max_points_x:
-            ax1.plot(max_points_x,max_points_y,'o',color='green',markersize=6,label='Local Maximums')
-    else:
-        st.warning("No turning points detected to plot. Chart will only show price data.")
+            # Prediction
+            st.subheader("🔮 Next Turning Point Prediction")
+            if turning_points:
+                last_point = turning_points[-1]
+                last_time = last_point[0]
+                last_price = last_point[1]
+                last_type = last_point[2]
+                
+                predicted_time = last_time + pd.Timedelta(hours=avg_duration)
+                
+                if last_type == -1:  # Last was minimum
+                    predicted_price = last_price * (1 + avg_price_change/100)
+                    predicted_type = "📈 Maximum (Sell Signal)"
+                else:  # Last was maximum
+                    predicted_price = last_price * (1 - avg_price_change/100)
+                    predicted_type = "📉 Minimum (Buy Signal)"
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("🕐 Predicted Time", predicted_time.strftime('%Y-%m-%d %H:%M'))
+                with col2:
+                    st.metric("💰 Predicted Price", f"{predicted_price:.4f}")
+                with col3:
+                    st.metric("📊 Signal Type", predicted_type)
     
-    # Plot projected next turning point
-    if 'projected_next_time' in locals() and 'projected_next_price' in locals():
-        ax1.axvline(x=projected_next_time, color='purple', linestyle=':', linewidth=1.5, label='Projected Next Pivot')
-        ax1.plot(projected_next_time, projected_next_price, 'X', color='purple', markersize=10, label='Projected Pivot Point')
-        ax1.annotate(f'Projected {projected_type_str}\n@ {projected_next_price:.4f}',
-                     xy=(projected_next_time, projected_next_price),
-                     xytext=(projected_next_time, projected_next_price + (df['Close'].max() - df['Close'].min()) * 0.05),
-                     arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5),
-                     horizontalalignment='center', verticalalignment='bottom', color='purple', fontsize=9,
-                     bbox=dict(boxstyle="round,pad=0.3", fc="lightblue", ec="b", lw=1, alpha=0.6))
-
-    ax1.set_title(f"{symbol} Price Chart with Turning Points ({timeframe}) - {selected_exchange_id.title()}")
-    ax1.set_xlabel("Time")
-    ax1.set_ylabel("Price")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend()
-    fig.autofmt_xdate()
+    # Chart
+    st.subheader("📊 Price Chart with Turning Points")
+    fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Plot price
+    ax.plot(df.index, df['Close'], label='Close Price', color='#1f77b4', linewidth=2)
+    
+    # Plot turning points
+    if turning_points:
+        min_points = [(p[0], p[1]) for p in turning_points if p[2] == -1]
+        max_points = [(p[0], p[1]) for p in turning_points if p[2] == 1]
+        
+        if min_points:
+            min_x, min_y = zip(*min_points)
+            ax.scatter(min_x, min_y, color='red', s=100, marker='o', label='Buy Points (Minima)', zorder=5)
+        
+        if max_points:
+            max_x, max_y = zip(*max_points)
+            ax.scatter(max_x, max_y, color='green', s=100, marker='o', label='Sell Points (Maxima)', zorder=5)
+    
+    # Add prediction line if available
+    if 'predicted_time' in locals() and 'predicted_price' in locals():
+        ax.axvline(x=predicted_time, color='purple', linestyle='--', alpha=0.7, label='Predicted Next Pivot')
+        ax.scatter([predicted_time], [predicted_price], color='purple', s=150, marker='X', label='Predicted Point', zorder=6)
+    
+    ax.set_title(f"{symbol} - {timeframe} - {selected_exchange_id.title()}", fontsize=16, fontweight='bold')
+    ax.set_xlabel("Time", fontsize=12)
+    ax.set_ylabel("Price", fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    
+    plt.xticks(rotation=45)
+    plt.tight_layout()
     st.pyplot(fig)
+    
+    status_placeholder.success("✅ Analysis complete!")
 
-# Add footer with additional information
+# Footer
 st.markdown("---")
 st.markdown("""
-### 💡 Tips for Better Performance:
-- **Binance** typically has fewer geographical restrictions
-- Use **longer timeframes** (1h, 4h, 1d) for more reliable data
-- **Reduce candle count** if you encounter timeout errors
-- Consider deploying from regions with fewer restrictions
+### 💡 Pro Tips:
+- **Binance** works best globally
+- **4h/1d timeframes** are most reliable  
+- **BTC/ETH pairs** have best data availability
+- **Deploy from US/EU** for best API access
+- **Reduce candles** if you get timeouts
+
+### 🌍 Hosting Recommendations:
+- **Railway.app** - Multiple regions, good for geo-blocked APIs
+- **Render.com** - US-based, reliable for crypto APIs  
+- **Fly.io** - Global deployment options
 """)
